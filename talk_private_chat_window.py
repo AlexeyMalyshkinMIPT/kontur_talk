@@ -8,6 +8,7 @@ import json
 import queue
 import sys
 import threading
+from ctypes import wintypes
 from dataclasses import dataclass
 from pathlib import Path
 from tkinter import BooleanVar, Canvas, Checkbutton, Frame, Label, Scrollbar, Text, Tk
@@ -35,6 +36,23 @@ RED = "#ef4444"
 SEPARATOR = "#243044"
 SENDER_COLORS = ("#38bdf8", "#a78bfa", "#34d399", "#fb7185", "#fbbf24")
 
+GWL_EXSTYLE = -20
+WS_EX_TRANSPARENT = 0x00000020
+WS_EX_LAYERED = 0x00080000
+WS_EX_NOACTIVATE = 0x08000000
+SWP_NOSIZE = 0x0001
+SWP_NOMOVE = 0x0002
+SWP_NOZORDER = 0x0004
+SWP_NOACTIVATE = 0x0010
+SWP_FRAMECHANGED = 0x0020
+WM_HOTKEY = 0x0312
+PM_REMOVE = 0x0001
+MOD_CONTROL = 0x0002
+MOD_SHIFT = 0x0004
+MOD_NOREPEAT = 0x4000
+VK_F10 = 0x79
+HOTKEY_ID = 0x4B54
+
 
 @dataclass(frozen=True)
 class StatusUpdate:
@@ -53,12 +71,16 @@ class TalkInbox:
         self.seen: set[tuple[str, str, str, str, int]] = set()
         self.empty_hint_visible = True
         self.topmost = BooleanVar(value=args.topmost)
+        self.click_through = BooleanVar(value=args.click_through)
+        self.hotkey_registered = False
 
         self._configure_window()
         self._build_ui()
         self._load_history(args.log)
+        self._register_hotkey()
         self.root.protocol("WM_DELETE_WINDOW", self.close)
         self.root.after(100, self._drain_events)
+        self.root.after(950, self._apply_click_through)
 
         self.worker = threading.Thread(target=self._watch, name="talk-reader", daemon=True)
         self.worker.start()
@@ -186,9 +208,9 @@ class TalkInbox:
         footer.pack(fill="x")
         Checkbutton(
             footer,
-            text="Поверх остальных окон",
-            variable=self.topmost,
-            command=self._toggle_topmost,
+            text="Клики сквозь окно",
+            variable=self.click_through,
+            command=self._apply_click_through,
             background=PANEL,
             foreground=MUTED,
             activebackground=PANEL,
@@ -200,14 +222,64 @@ class TalkInbox:
         ).pack(side="left")
         Label(
             footer,
-            text="Общий + личные · только чтение",
+            text="Ctrl+Shift+F10 · разблокировать",
             background=PANEL,
             foreground=MUTED,
             font=("Segoe UI", 9),
         ).pack(side="right")
 
-    def _toggle_topmost(self) -> None:
+    def _window_handles(self) -> list[int]:
+        user32 = ctypes.windll.user32
+        handles: list[int] = []
+        handle = self.root.winfo_id()
+        while handle and handle not in handles:
+            handles.append(handle)
+            handle = user32.GetParent(handle)
+        return handles
+
+    def _apply_click_through(self) -> None:
+        enabled = self.click_through.get()
+        user32 = ctypes.windll.user32
+        for handle in self._window_handles():
+            style = user32.GetWindowLongW(handle, GWL_EXSTYLE)
+            if enabled:
+                style |= WS_EX_TRANSPARENT | WS_EX_LAYERED | WS_EX_NOACTIVATE
+            else:
+                style &= ~(WS_EX_TRANSPARENT | WS_EX_NOACTIVATE)
+            user32.SetWindowLongW(handle, GWL_EXSTYLE, style)
+            user32.SetWindowPos(
+                handle,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE
+                | SWP_NOSIZE
+                | SWP_NOZORDER
+                | SWP_NOACTIVATE
+                | SWP_FRAMECHANGED,
+            )
         self.root.attributes("-topmost", self.topmost.get())
+
+    def _register_hotkey(self) -> None:
+        modifiers = MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT
+        self.hotkey_registered = bool(
+            ctypes.windll.user32.RegisterHotKey(None, HOTKEY_ID, modifiers, VK_F10)
+        )
+        if self.hotkey_registered:
+            self.root.after(100, self._poll_hotkey)
+
+    def _poll_hotkey(self) -> None:
+        message = wintypes.MSG()
+        user32 = ctypes.windll.user32
+        while user32.PeekMessageW(
+            ctypes.byref(message), None, WM_HOTKEY, WM_HOTKEY, PM_REMOVE
+        ):
+            if message.wParam == HOTKEY_ID:
+                self.click_through.set(not self.click_through.get())
+                self._apply_click_through()
+        if not self.stop_event.is_set():
+            self.root.after(100, self._poll_hotkey)
 
     def _watch(self) -> None:
         pythoncom.CoInitialize()
@@ -328,6 +400,8 @@ class TalkInbox:
 
     def close(self) -> None:
         self.stop_event.set()
+        if self.hotkey_registered:
+            ctypes.windll.user32.UnregisterHotKey(None, HOTKEY_ID)
         self.root.destroy()
 
     def run(self) -> None:
@@ -355,8 +429,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--topmost",
-        action="store_true",
-        help="Закрепить окно поверх остальных (по умолчанию выключено).",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Закрепить окно поверх остальных (по умолчанию включено).",
+    )
+    parser.add_argument(
+        "--click-through",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Пропускать клики сквозь окно (по умолчанию включено).",
     )
     parser.add_argument(
         "--include-history",
