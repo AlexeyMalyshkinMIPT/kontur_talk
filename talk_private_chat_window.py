@@ -37,23 +37,25 @@ RED = "#ef4444"
 SEPARATOR = "#243044"
 SENDER_COLORS = ("#38bdf8", "#a78bfa", "#34d399", "#fb7185", "#fbbf24")
 
-GWL_EXSTYLE = -20
-WS_EX_TRANSPARENT = 0x00000020
-WS_EX_LAYERED = 0x00080000
-WS_EX_NOACTIVATE = 0x08000000
-SWP_NOSIZE = 0x0001
-SWP_NOMOVE = 0x0002
-SWP_NOZORDER = 0x0004
-SWP_NOACTIVATE = 0x0010
-SWP_FRAMECHANGED = 0x0020
+GWLP_WNDPROC = -4
+WM_NCHITTEST = 0x0084
 WM_HOTKEY = 0x0312
 PM_REMOVE = 0x0001
+HTCLIENT = 1
+HTTRANSPARENT = -1
 MOD_CONTROL = 0x0002
 MOD_SHIFT = 0x0004
 MOD_NOREPEAT = 0x4000
 VK_F10 = 0x79
 VK_CONTROL = 0x11
 HOTKEY_ID = 0x4B54
+WNDPROC = ctypes.WINFUNCTYPE(
+    ctypes.c_ssize_t,
+    wintypes.HWND,
+    wintypes.UINT,
+    wintypes.WPARAM,
+    wintypes.LPARAM,
+)
 
 
 @dataclass(frozen=True)
@@ -78,9 +80,14 @@ class TalkInbox:
         self.click_through = BooleanVar(value=args.click_through)
         self.click_through_applied: bool | None = None
         self.hotkey_registered = False
+        self.hooked_handle: int | None = None
+        self.original_window_proc: int | None = None
+        self.window_proc_callback: Any | None = None
 
         self._configure_window()
         self._build_ui()
+        self.root.update_idletasks()
+        self._install_hit_test_hook()
         self._load_history(args.log)
         self._register_hotkey()
         self.root.protocol("WM_DELETE_WINDOW", self.close)
@@ -227,7 +234,7 @@ class TalkInbox:
         ).pack(side="left")
         Label(
             footer,
-            text="Удерживай Ctrl · двигай окно",
+            text="Заголовок — двигать · Ctrl — скролл",
             background=PANEL,
             foreground=MUTED,
             font=("Segoe UI", 9),
@@ -242,32 +249,68 @@ class TalkInbox:
             handle = user32.GetParent(handle)
         return handles
 
+    def _install_hit_test_hook(self) -> None:
+        user32 = ctypes.windll.user32
+        user32.SetWindowLongPtrW.argtypes = [
+            wintypes.HWND,
+            ctypes.c_int,
+            ctypes.c_void_p,
+        ]
+        user32.SetWindowLongPtrW.restype = ctypes.c_void_p
+        user32.CallWindowProcW.argtypes = [
+            ctypes.c_void_p,
+            wintypes.HWND,
+            wintypes.UINT,
+            wintypes.WPARAM,
+            wintypes.LPARAM,
+        ]
+        user32.CallWindowProcW.restype = ctypes.c_ssize_t
+
+        self.hooked_handle = self._window_handles()[-1]
+        self.window_proc_callback = WNDPROC(self._window_proc)
+        original = user32.SetWindowLongPtrW(
+            self.hooked_handle,
+            GWLP_WNDPROC,
+            ctypes.cast(self.window_proc_callback, ctypes.c_void_p),
+        )
+        if not original:
+            raise OSError("Не удалось включить режим пропуска кликов.")
+        self.original_window_proc = int(original)
+
+    def _window_proc(
+        self,
+        handle: int,
+        message: int,
+        wparam: int,
+        lparam: int,
+    ) -> int:
+        if self.original_window_proc is None:
+            return ctypes.windll.user32.DefWindowProcW(
+                handle, message, wparam, lparam
+            )
+        result = ctypes.windll.user32.CallWindowProcW(
+            ctypes.c_void_p(self.original_window_proc),
+            handle,
+            message,
+            wparam,
+            lparam,
+        )
+        if (
+            message == WM_NCHITTEST
+            and self.click_through_applied
+            and result == HTCLIENT
+        ):
+            return HTTRANSPARENT
+        return result
+
     def _apply_click_through(self) -> None:
         user32 = ctypes.windll.user32
         ctrl_held = bool(user32.GetAsyncKeyState(VK_CONTROL) & 0x8000)
         enabled = self.click_through.get() and not ctrl_held
         if enabled == self.click_through_applied:
             return
-        for handle in self._window_handles():
-            style = user32.GetWindowLongW(handle, GWL_EXSTYLE)
-            if enabled:
-                style |= WS_EX_TRANSPARENT | WS_EX_LAYERED | WS_EX_NOACTIVATE
-            else:
-                style &= ~(WS_EX_TRANSPARENT | WS_EX_NOACTIVATE)
-            user32.SetWindowLongW(handle, GWL_EXSTYLE, style)
-            user32.SetWindowPos(
-                handle,
-                0,
-                0,
-                0,
-                0,
-                SWP_NOMOVE
-                | SWP_NOSIZE
-                | SWP_NOZORDER
-                | SWP_NOACTIVATE
-                | SWP_FRAMECHANGED,
-            )
         self.click_through_applied = enabled
+        self.root.update_idletasks()
         self.root.attributes("-topmost", self.topmost.get())
 
     def _register_hotkey(self) -> None:
@@ -445,6 +488,13 @@ class TalkInbox:
         self.stop_event.set()
         if self.hotkey_registered:
             ctypes.windll.user32.UnregisterHotKey(None, HOTKEY_ID)
+        if self.hooked_handle and self.original_window_proc:
+            ctypes.windll.user32.SetWindowLongPtrW(
+                self.hooked_handle,
+                GWLP_WNDPROC,
+                ctypes.c_void_p(self.original_window_proc),
+            )
+            self.original_window_proc = None
         self.root.destroy()
 
     def run(self) -> None:
