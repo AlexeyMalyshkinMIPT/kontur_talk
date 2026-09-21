@@ -117,6 +117,8 @@ class ScanTests(unittest.TestCase):
             patch.object(reader, "ensure_private_list"),
             patch.object(reader, "_same_window", return_value=False),
             patch.object(reader, "_public_tab", return_value=public_tab),
+            patch.object(reader, "_private_tab", return_value=object()),
+            patch.object(reader, "_tab_unread", return_value=0),
             patch.object(reader, "_class_name", return_value="tab_active"),
             patch.object(
                 reader, "read_open_conversation", return_value=[public_message]
@@ -139,6 +141,62 @@ class ScanTests(unittest.TestCase):
         read_messages.assert_called_once()
         self.assertIs(read_messages.call_args.args[0], public_window)
         open_public.assert_not_called()
+
+    def test_scan_opens_unread_private_chat_on_detached_window(self) -> None:
+        private_window = object()
+        public_window = object()
+        public_tab = object()
+        private_tab = object()
+        private_conversation = reader.Conversation("Ученик Б", "Ученик Б 1", 1)
+        private_message = reader.TalkMessage(
+            captured_at="2026-09-21T12:00:01+03:00",
+            conversation="Ученик Б",
+            sender="Ученик Б",
+            displayed_time="12:00",
+            text="Ответ лично",
+        )
+        emitted_messages: list[reader.TalkMessage] = []
+
+        def read_messages(_window: object, conversation: reader.Conversation):
+            if conversation.name == reader.PUBLIC_CONVERSATION:
+                return []
+            return [private_message]
+
+        with (
+            patch.object(reader, "_same_window", return_value=False),
+            patch.object(reader, "_public_tab", return_value=public_tab),
+            patch.object(reader, "_private_tab", return_value=private_tab),
+            patch.object(reader, "_class_name", return_value="tab_active"),
+            patch.object(
+                reader,
+                "_tab_unread",
+                side_effect=lambda tab: 1 if tab is private_tab else 0,
+            ),
+            patch.object(reader, "ensure_private_list") as open_private,
+            patch.object(reader, "ensure_public_chat") as open_public,
+            patch.object(
+                reader, "list_conversations", return_value=[private_conversation]
+            ),
+            patch.object(reader, "_open_conversation") as open_conversation,
+            patch.object(reader, "_return_to_private_list"),
+            patch.object(reader, "read_open_conversation", side_effect=read_messages),
+            patch.object(reader, "_wait_for", side_effect=lambda predicate, _label: predicate()),
+        ):
+            total, emitted = reader.scan(
+                private_window,
+                public_window=public_window,
+                include_read=False,
+                organizer=None,
+                seen=set(),
+                log_path=None,
+                on_message=emitted_messages.append,
+            )
+
+        self.assertEqual((total, emitted), (1, 1))
+        self.assertEqual(emitted_messages, [private_message])
+        open_private.assert_called_with(public_window)
+        open_conversation.assert_called_once_with(public_window, private_conversation)
+        open_public.assert_called_once_with(public_window)
 
 
 if __name__ == "__main__":

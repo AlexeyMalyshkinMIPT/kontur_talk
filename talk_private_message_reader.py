@@ -196,12 +196,11 @@ def find_chat_windows() -> tuple[Any, Any]:
 
 
 def prepare_chat_windows(private_window: Any, public_window: Any) -> None:
-    """Configure separate Talk surfaces once, before the read-only polling loop."""
+    """Put the detached chat on Public before the polling loop starts."""
     if _same_window(private_window, public_window):
         ensure_private_list(private_window)
         return
     ensure_public_chat(public_window)
-    ensure_private_list(private_window)
 
 
 def _button(window: Any, predicate: Callable[[Any], bool]) -> Any | None:
@@ -462,6 +461,52 @@ def scan(
                         stream.write(json.dumps(asdict(message), ensure_ascii=False) + "\n")
             emitted += 1
 
+    public_source = public_window if public_window is not None else window
+    separate_public_window = not _same_window(window, public_source)
+    public_conversation = Conversation(
+        name=PUBLIC_CONVERSATION,
+        label=PUBLIC_CONVERSATION,
+        unread=None,
+    )
+
+    if separate_public_window:
+        public_tab = _public_tab(public_source)
+        if public_tab is None or "_active" not in _class_name(public_tab):
+            raise RuntimeError(
+                "Отдельное окно Толка больше не открыто на вкладке «Общий чат»."
+            )
+        collect(read_open_conversation(public_source, public_conversation))
+
+        # Only the detached chat exposes the aggregate `ЛИЧНЫЕ N` counter.
+        # The hidden main meeting window keeps a stale tab without that counter,
+        # so it cannot be used as an independent private-message surface.
+        private_tab = _private_tab(public_source)
+        should_read_private = include_read or _tab_unread(private_tab) > 0
+        if not should_read_private:
+            return 0, emitted
+
+        try:
+            ensure_private_list(public_source)
+            conversations = list_conversations(public_source)
+            selected = (
+                conversations
+                if include_read
+                else [item for item in conversations if item.unread]
+            )
+            for conversation in selected:
+                _open_conversation(public_source, conversation)
+                messages = _wait_for(
+                    lambda current=conversation: read_open_conversation(
+                        public_source, current
+                    ),
+                    f"сообщения в чате с {conversation.name}",
+                )
+                collect(messages)
+                _return_to_private_list(public_source)
+            return len(conversations), emitted
+        finally:
+            ensure_public_chat(public_source)
+
     open_header = _conversation_header(window)
     open_conversation: Conversation | None = None
     if open_header is not None:
@@ -473,21 +518,8 @@ def scan(
         _return_to_private_list(window)
 
     ensure_private_list(window)
-    public_source = public_window if public_window is not None else window
-    separate_public_window = not _same_window(window, public_source)
     public_tab = _public_tab(public_source)
-    public_conversation = Conversation(
-        name=PUBLIC_CONVERSATION,
-        label=PUBLIC_CONVERSATION,
-        unread=None,
-    )
-    if separate_public_window:
-        if public_tab is None or "_active" not in _class_name(public_tab):
-            raise RuntimeError(
-                "Отдельное окно Толка больше не открыто на вкладке «Общий чат»."
-            )
-        collect(read_open_conversation(public_source, public_conversation))
-    elif include_read or _tab_unread(public_tab) > 0:
+    if include_read or _tab_unread(public_tab) > 0:
         ensure_public_chat(public_source)
         collect(read_open_conversation(public_source, public_conversation))
         ensure_private_list(window)
