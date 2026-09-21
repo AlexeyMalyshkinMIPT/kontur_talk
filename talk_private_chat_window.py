@@ -1,4 +1,4 @@
-"""Small desktop inbox for private messages from a Kontur.Talk meeting."""
+"""Small desktop inbox for public and private Kontur.Talk messages."""
 
 from __future__ import annotations
 
@@ -15,7 +15,12 @@ from typing import Any
 
 import pythoncom
 
-from talk_private_message_reader import TalkMessage, find_meeting_window, scan
+from talk_private_message_reader import (
+    PUBLIC_CONVERSATION,
+    TalkMessage,
+    find_meeting_window,
+    scan,
+)
 
 BACKGROUND = "#0b1120"
 PANEL = "#111827"
@@ -44,7 +49,7 @@ class TalkInbox:
         self.stop_event = threading.Event()
         self.message_count = 0
         self.senders: set[str] = set()
-        self.seen: set[tuple[str, str, str, str]] = set()
+        self.seen: set[tuple[str, str, str, str, int]] = set()
         self.empty_hint_visible = True
         self.topmost = BooleanVar(value=not args.no_topmost)
 
@@ -58,7 +63,7 @@ class TalkInbox:
         self.worker.start()
 
     def _configure_window(self) -> None:
-        self.root.title("Толк · личные сообщения")
+        self.root.title("Толк · сообщения встречи")
         self.root.configure(background=BACKGROUND)
         self.root.minsize(440, 520)
         width, height = 540, 760
@@ -75,7 +80,7 @@ class TalkInbox:
         title_row.pack(fill="x")
         Label(
             title_row,
-            text="Личные сообщения",
+            text="Сообщения встречи",
             background=PANEL,
             foreground=TEXT,
             font=("Segoe UI Semibold", 17),
@@ -150,9 +155,19 @@ class TalkInbox:
             font=("Segoe UI", 12),
         )
         self.feed.tag_configure("time", foreground=MUTED, font=("Segoe UI", 9))
+        self.feed.tag_configure(
+            "channel_public",
+            foreground="#fbbf24",
+            font=("Segoe UI Semibold", 9),
+        )
+        self.feed.tag_configure(
+            "channel_private",
+            foreground=ACCENT,
+            font=("Segoe UI Semibold", 9),
+        )
         self.feed.tag_configure("body", foreground=TEXT, font=("Segoe UI", 14), spacing3=10)
         self.feed.tag_configure("separator", foreground=SEPARATOR, font=("Consolas", 8))
-        self.feed.insert("end", "Жду личные сообщения учеников…", "empty")
+        self.feed.insert("end", "Жду сообщения из общего и личных чатов…", "empty")
         self.feed.configure(state="disabled")
 
         footer = Frame(self.root, background=PANEL, padx=18, pady=12)
@@ -173,7 +188,7 @@ class TalkInbox:
         ).pack(side="left")
         Label(
             footer,
-            text="Только чтение",
+            text="Общий + личные · только чтение",
             background=PANEL,
             foreground=MUTED,
             font=("Segoe UI", 9),
@@ -202,7 +217,7 @@ class TalkInbox:
                         discover=True,
                     )
                     first_pass = False
-                    suffix = f" · {total} личн. чатов" if total else ""
+                    suffix = f" · общий + {total} личн." if total else " · общий"
                     self.events.put(
                         ("status", StatusUpdate("connected", f"Подключено{suffix}"))
                     )
@@ -265,6 +280,10 @@ class TalkInbox:
             self.feed.delete("1.0", "end")
             self.empty_hint_visible = False
 
+        is_public = message.conversation == PUBLIC_CONVERSATION
+        channel_label = "ОБЩИЙ" if is_public else "ЛИЧНО"
+        channel_tag = "channel_public" if is_public else "channel_private"
+        self.feed.insert("end", f"{channel_label}  ", channel_tag)
         self.feed.insert("end", message.sender, self._sender_tag(message.sender))
         self.feed.insert("end", f"    {message.displayed_time}\n", "time")
         self.feed.insert("end", f"{message.text}\n", "body")
@@ -315,7 +334,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--log",
         type=Path,
-        default=Path(".tmp/talk_private_messages.jsonl"),
+        default=Path(".tmp/talk_messages.jsonl"),
         help="Локальный JSONL-лог сообщений.",
     )
     parser.add_argument(

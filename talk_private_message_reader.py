@@ -1,4 +1,4 @@
-"""Read private Kontur.Talk meeting messages through Windows UI Automation.
+"""Read public and private Kontur.Talk messages through Windows UI Automation.
 
 This is a local prototype for the desktop Kontur.Talk application. It does not
 use Talk credentials, intercept network traffic, or send messages. Opening a
@@ -42,6 +42,7 @@ ROLE_SUFFIX_RE = re.compile(
     re.IGNORECASE,
 )
 CHAT_WIDTH = 620
+PUBLIC_CONVERSATION = "Общий чат"
 
 
 @dataclass(frozen=True)
@@ -51,10 +52,17 @@ class TalkMessage:
     sender: str
     displayed_time: str
     text: str
+    occurrence: int = 0
 
     @property
-    def fingerprint(self) -> tuple[str, str, str, str]:
-        return (self.conversation, self.sender, self.displayed_time, self.text)
+    def fingerprint(self) -> tuple[str, str, str, str, int]:
+        return (
+            self.conversation,
+            self.sender,
+            self.displayed_time,
+            self.text,
+            self.occurrence,
+        )
 
 
 @dataclass(frozen=True)
@@ -168,6 +176,10 @@ def _private_tab(window: Any) -> Any | None:
     return _button(window, lambda item: _name(item).upper().startswith("ЛИЧНЫЕ"))
 
 
+def _public_tab(window: Any) -> Any | None:
+    return _button(window, lambda item: _name(item).upper().startswith("ОБЩИЙ ЧАТ"))
+
+
 def _conversation_header(window: Any) -> Any | None:
     left = _content_bounds(window).left
     return _button(
@@ -201,6 +213,30 @@ def ensure_private_list(window: Any) -> None:
             lambda: _private_tab(window) is not None
             and "_active" in _class_name(_private_tab(window)),
             "активная вкладка «Личные»",
+        )
+
+
+def ensure_public_chat(window: Any) -> None:
+    """Open Chat -> Public, returning from a private conversation if necessary."""
+    public_tab = _public_tab(window)
+    if public_tab is None:
+        header = _conversation_header(window)
+        if header is not None:
+            header.invoke()
+            public_tab = _wait_for(lambda: _public_tab(window), "вкладка «Общий чат»")
+        else:
+            chat = _button(window, lambda item: _name(item) == "Чат")
+            if chat is None:
+                raise RuntimeError("В окне встречи не найдена кнопка «Чат».")
+            chat.invoke()
+            public_tab = _wait_for(lambda: _public_tab(window), "панель чата")
+
+    if "_active" not in _class_name(public_tab):
+        public_tab.invoke()
+        _wait_for(
+            lambda: _public_tab(window) is not None
+            and "_active" in _class_name(_public_tab(window)),
+            "активная вкладка «Общий чат»",
         )
 
 
@@ -258,21 +294,6 @@ def _set_private_search(window: Any, value: str) -> None:
     time.sleep(0.15)
 
 
-def _open_conversation_by_search(window: Any, name: str) -> None:
-    ensure_private_list(window)
-    _set_private_search(window, name)
-    target = _wait_for(
-        lambda: _button(
-            window,
-            lambda item: _class_name(item) == "global-as-button"
-            and _conversation_name(_name(item)) == name,
-        ),
-        f"результат поиска личного чата с {name}",
-    )
-    target.invoke()
-    _wait_for(lambda: _conversation_header(window), f"чат с {name}")
-
-
 def _open_conversation(window: Any, conversation: Conversation) -> None:
     ensure_private_list(window)
     target = _button(
@@ -319,6 +340,7 @@ def read_open_conversation(window: Any, conversation: Conversation) -> list[Talk
 
     now = datetime.now().astimezone().isoformat(timespec="seconds")
     messages: list[TalkMessage] = []
+    occurrences: dict[tuple[str, str, str], int] = {}
     for group in _message_groups(window):
         body = _group_text(group)
         if not body:
@@ -343,6 +365,9 @@ def read_open_conversation(window: Any, conversation: Conversation) -> list[Talk
             sender_candidates,
             key=lambda item: abs(item.rectangle().left - group.rectangle().left),
         )
+        duplicate_key = (_name(sender), _name(time_item), body)
+        occurrence = occurrences.get(duplicate_key, 0)
+        occurrences[duplicate_key] = occurrence + 1
         messages.append(
             TalkMessage(
                 captured_at=now,
@@ -350,6 +375,7 @@ def read_open_conversation(window: Any, conversation: Conversation) -> list[Talk
                 sender=_name(sender),
                 displayed_time=_name(time_item),
                 text=body,
+                occurrence=occurrence,
             )
         )
     return messages
@@ -363,8 +389,13 @@ def _return_to_private_list(window: Any) -> None:
 
 
 def _emit(message: TalkMessage, log_path: Path | None) -> None:
+    channel = (
+        PUBLIC_CONVERSATION
+        if message.conversation == PUBLIC_CONVERSATION
+        else f"Лично: {message.conversation}"
+    )
     print(
-        f"[{message.displayed_time}] {message.sender}: {message.text}",
+        f"[{message.displayed_time}] [{channel}] {message.sender}: {message.text}",
         flush=True,
     )
     if log_path is None:
@@ -379,7 +410,7 @@ def scan(
     *,
     include_read: bool,
     organizer: str | None,
-    seen: set[tuple[str, str, str, str]],
+    seen: set[tuple[str, str, str, str, int]],
     log_path: Path | None,
     on_message: Callable[[TalkMessage], None] | None = None,
     discover: bool = True,
@@ -415,6 +446,14 @@ def scan(
             return 1, emitted
         _return_to_private_list(window)
 
+    ensure_public_chat(window)
+    public_conversation = Conversation(
+        name=PUBLIC_CONVERSATION,
+        label=PUBLIC_CONVERSATION,
+        unread=None,
+    )
+    collect(read_open_conversation(window, public_conversation))
+
     ensure_private_list(window)
     # A previous lookup can leave text in Talk's search field. In that state an
     # unread badge is visible, but the conversation row is filtered out and a
@@ -427,23 +466,20 @@ def scan(
     # conversations only on startup; subsequent passes open just rows with new
     # messages so the cost grows with activity, not with the class size.
     selected = conversations if include_read else [item for item in conversations if item.unread]
-    for index, conversation in enumerate(selected):
+    for conversation in selected:
         _open_conversation(window, conversation)
         messages = _wait_for(
             lambda current=conversation: read_open_conversation(window, current),
             f"сообщения в чате с {conversation.name}",
         )
         collect(messages)
-        if index < len(selected) - 1:
-            _return_to_private_list(window)
-    if not selected and open_conversation is not None:
-        _open_conversation_by_search(window, open_conversation.name)
+        _return_to_private_list(window)
     return len(conversations), emitted
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Собирает личные сообщения встречи Контур.Толка в единый поток."
+        description="Собирает общий и личные чаты Контур.Толка в единый поток."
     )
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--once", action="store_true", help="Сделать один проход (по умолчанию).")
@@ -470,7 +506,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--log",
         type=Path,
-        default=Path(".tmp/talk_private_messages.jsonl"),
+        default=Path(".tmp/talk_messages.jsonl"),
         help="JSONL-файл для лога; укажите пустую строку, чтобы отключить.",
     )
     return parser.parse_args()
@@ -490,7 +526,7 @@ def main() -> int:
         flush=True,
     )
 
-    seen: set[tuple[str, str, str, str]] = set()
+    seen: set[tuple[str, str, str, str, int]] = set()
     first_pass = True
     try:
         while True:
@@ -502,7 +538,11 @@ def main() -> int:
                 log_path=log_path,
             )
             if first_pass:
-                print(f"Личных чатов: {total}; новых строк выведено: {emitted}.", flush=True)
+                print(
+                    f"Общий чат + личных чатов: {total}; "
+                    f"новых строк выведено: {emitted}.",
+                    flush=True,
+                )
             first_pass = False
             if not args.watch:
                 break
