@@ -176,21 +176,23 @@ def find_meeting_window() -> Any:
 
 def find_chat_windows() -> tuple[Any, Any]:
     """Return `(private_window, public_window)` for non-switching monitoring."""
-    candidates = _meeting_candidates()
-    if not candidates:
-        raise RuntimeError("Окно встречи не найдено. Откройте встречу в приложении Толк.")
-
-    detached = [window for window in candidates if _name(window) == "ktalk"]
+    # Fast path: avoid walking the full UIA tree of every top-level window
+    # (especially Chrome) when the detached Talk window has an exact title.
+    top_level_windows = Desktop(backend="uia").windows()
+    detached = [window for window in top_level_windows if _name(window) == "ktalk"]
     for public_window in sorted(detached, key=_window_score, reverse=True):
         private = [
             window
-            for window in candidates
+            for window in top_level_windows
             if window.process_id() == public_window.process_id()
             and _name(window) == "Встреча"
         ]
         if private:
             return max(private, key=_window_score), public_window
 
+    candidates = [window for window in top_level_windows if _is_talk_meeting(window)]
+    if not candidates:
+        raise RuntimeError("Окно встречи не найдено. Откройте встречу в приложении Толк.")
     single_window = max(candidates, key=_window_score)
     return single_window, single_window
 

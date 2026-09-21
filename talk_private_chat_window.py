@@ -70,6 +70,7 @@ class TalkInbox:
         self.events: queue.Queue[tuple[str, Any]] = queue.Queue()
         self.stop_event = threading.Event()
         self.message_count = 0
+        self.connection_state = "подключаюсь"
         self.senders: set[str] = set()
         self.seen: set[tuple[str, str, str, str, int]] = set()
         self.empty_hint_visible = True
@@ -319,6 +320,7 @@ class TalkInbox:
                         self.events.put(("pulse", None))
                     self.stop_event.wait(self.args.interval)
                 except Exception as exc:
+                    self._record_runtime_error("watch", exc)
                     private_window = None
                     public_window = None
                     self.events.put(("status", StatusUpdate("error", str(exc))))
@@ -410,7 +412,7 @@ class TalkInbox:
 
         self.message_count += 1
         self.senders.add(message.sender)
-        self.root.title(f"Толк · сообщения встречи · {self.message_count}")
+        self._update_title()
         noun = "ученик" if len(self.senders) == 1 else "ученика"
         self.counter_label.configure(
             text=f"{self.message_count} сообщений · {len(self.senders)} {noun}"
@@ -419,10 +421,21 @@ class TalkInbox:
     def _set_status(self, update: StatusUpdate) -> None:
         colors = {"connecting": YELLOW, "connected": GREEN, "error": RED}
         self.status_dot.itemconfigure(self.status_oval, fill=colors.get(update.state, MUTED))
+        self.connection_state = {
+            "connected": "подключено",
+            "connecting": "подключаюсь",
+            "error": "ошибка",
+        }.get(update.state, update.state)
+        self._update_title()
         text = update.text
         if len(text) > 45:
             text = text[:42] + "…"
         self.status_label.configure(text=text)
+
+    def _update_title(self) -> None:
+        self.root.title(
+            f"Толк · {self.connection_state} · {self.message_count} сообщений"
+        )
 
     def _pulse(self) -> None:
         self.status_dot.itemconfigure(self.status_oval, fill=ACCENT)
