@@ -8,6 +8,7 @@ import json
 import queue
 import sys
 import threading
+import traceback
 from ctypes import wintypes
 from dataclasses import dataclass
 from pathlib import Path
@@ -65,6 +66,7 @@ class TalkInbox:
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
         self.root = Tk()
+        self.root.report_callback_exception = self._report_callback_exception
         self.events: queue.Queue[tuple[str, Any]] = queue.Queue()
         self.stop_event = threading.Event()
         self.message_count = 0
@@ -336,8 +338,30 @@ class TalkInbox:
                     self._pulse()
         except queue.Empty:
             pass
-        if not self.stop_event.is_set():
-            self.root.after(100, self._drain_events)
+        except Exception as exc:
+            self._record_runtime_error("drain-events", exc)
+        finally:
+            if not self.stop_event.is_set():
+                self.root.after(100, self._drain_events)
+
+    def _record_runtime_error(self, context: str, exc: BaseException) -> None:
+        error_log = self.args.log.parent / "talk_runtime_errors.log"
+        try:
+            error_log.parent.mkdir(parents=True, exist_ok=True)
+            with error_log.open("a", encoding="utf-8") as stream:
+                stream.write(f"[{context}] {type(exc).__name__}: {exc}\n")
+                stream.writelines(traceback.format_exception(exc))
+        except OSError:
+            pass
+
+    def _report_callback_exception(
+        self,
+        exc_type: type[BaseException],
+        exc: BaseException,
+        traceback_object: Any,
+    ) -> None:
+        del exc_type, traceback_object
+        self._record_runtime_error("tk-callback", exc)
 
     def _sender_tag(self, sender: str) -> str:
         tag = f"sender_{abs(hash(sender)) % len(SENDER_COLORS)}"
@@ -386,6 +410,7 @@ class TalkInbox:
 
         self.message_count += 1
         self.senders.add(message.sender)
+        self.root.title(f"Толк · сообщения встречи · {self.message_count}")
         noun = "ученик" if len(self.senders) == 1 else "ученика"
         self.counter_label.configure(
             text=f"{self.message_count} сообщений · {len(self.senders)} {noun}"
