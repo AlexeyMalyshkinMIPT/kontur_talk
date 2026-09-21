@@ -18,7 +18,8 @@ import pythoncom
 from talk_private_message_reader import (
     PUBLIC_CONVERSATION,
     TalkMessage,
-    find_meeting_window,
+    find_chat_windows,
+    prepare_chat_windows,
     scan,
 )
 
@@ -210,16 +211,19 @@ class TalkInbox:
 
     def _watch(self) -> None:
         pythoncom.CoInitialize()
-        window: Any | None = None
+        private_window: Any | None = None
+        public_window: Any | None = None
         first_pass = True
         try:
             while not self.stop_event.is_set():
                 try:
-                    if window is None:
+                    if private_window is None or public_window is None:
                         self.events.put(("status", StatusUpdate("connecting", "Ищу встречу…")))
-                        window = find_meeting_window()
+                        private_window, public_window = find_chat_windows()
+                        prepare_chat_windows(private_window, public_window)
                     total, emitted = scan(
-                        window,
+                        private_window,
+                        public_window=public_window,
                         include_read=self.args.include_history and first_pass,
                         organizer=self.args.organizer,
                         seen=self.seen,
@@ -236,7 +240,8 @@ class TalkInbox:
                         self.events.put(("pulse", None))
                     self.stop_event.wait(self.args.interval)
                 except Exception as exc:
-                    window = None
+                    private_window = None
+                    public_window = None
                     self.events.put(("status", StatusUpdate("error", str(exc))))
                     self.stop_event.wait(2.0)
         finally:

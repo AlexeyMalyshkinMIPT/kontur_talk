@@ -99,6 +99,47 @@ class ScanTests(unittest.TestCase):
             [reader.PUBLIC_CONVERSATION, "Ученик Б"],
         )
 
+    def test_scan_reads_separate_public_window_without_unread_counter(self) -> None:
+        private_window = object()
+        public_window = object()
+        public_message = reader.TalkMessage(
+            captured_at="2026-09-21T12:00:00+03:00",
+            conversation=reader.PUBLIC_CONVERSATION,
+            sender="Ученик А",
+            displayed_time="12:00",
+            text="Сообщение без счётчика",
+        )
+        public_tab = object()
+        emitted_messages: list[reader.TalkMessage] = []
+
+        with (
+            patch.object(reader, "_conversation_header", return_value=None),
+            patch.object(reader, "ensure_private_list"),
+            patch.object(reader, "_same_window", return_value=False),
+            patch.object(reader, "_public_tab", return_value=public_tab),
+            patch.object(reader, "_class_name", return_value="tab_active"),
+            patch.object(
+                reader, "read_open_conversation", return_value=[public_message]
+            ) as read_messages,
+            patch.object(reader, "list_conversations", return_value=[]),
+            patch.object(reader, "ensure_public_chat") as open_public,
+        ):
+            total, emitted = reader.scan(
+                private_window,
+                public_window=public_window,
+                include_read=False,
+                organizer=None,
+                seen=set(),
+                log_path=None,
+                on_message=emitted_messages.append,
+            )
+
+        self.assertEqual((total, emitted), (0, 1))
+        self.assertEqual(emitted_messages, [public_message])
+        read_messages.assert_called_once()
+        self.assertIs(read_messages.call_args.args[0], public_window)
+        open_public.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

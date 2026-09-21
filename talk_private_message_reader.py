@@ -134,35 +134,74 @@ def _is_talk_meeting(window: Any) -> bool:
         return False
 
 
+def _window_score(window: Any) -> tuple[int, int]:
+    buttons = window.descendants(control_type="Button")
+    detached = any(
+        _name(item) == "Конференция" and "tab" in _class_name(item) for item in buttons
+    )
+    chat_selected = any(
+        _name(item) == "Чат" and "_selected" in _class_name(item) for item in buttons
+    )
+    private_visible = any(_name(item).upper().startswith("ЛИЧНЫЕ") for item in buttons)
+    rect = _content_bounds(window)
+    area = max(0, rect.right - rect.left) * max(0, rect.bottom - rect.top)
+    return (100 * detached + 10 * chat_selected + 5 * private_visible, area)
+
+
+def _meeting_candidates() -> list[Any]:
+    return [w for w in Desktop(backend="uia").windows() if _is_talk_meeting(w)]
+
+
+def _same_window(first: Any, second: Any) -> bool:
+    if first is second:
+        return True
+    return first.element_info.handle == second.element_info.handle
+
+
 def find_meeting_window() -> Any:
-    candidates = [w for w in Desktop(backend="uia").windows() if _is_talk_meeting(w)]
+    candidates = _meeting_candidates()
     if not candidates:
         raise RuntimeError("Окно встречи не найдено. Откройте встречу в приложении Толк.")
-
-    def score(window: Any) -> tuple[int, int]:
-        buttons = window.descendants(control_type="Button")
-        detached = any(
-            _name(item) == "Конференция" and "tab" in _class_name(item)
-            for item in buttons
-        )
-        chat_selected = any(
-            _name(item) == "Чат" and "_selected" in _class_name(item)
-            for item in buttons
-        )
-        private_visible = any(_name(item).upper().startswith("ЛИЧНЫЕ") for item in buttons)
-        rect = _content_bounds(window)
-        area = max(0, rect.right - rect.left) * max(0, rect.bottom - rect.top)
-        return (100 * detached + 10 * chat_selected + 5 * private_visible, area)
 
     # Talk can detach its controls/chat into a real visible `ktalk` window while
     # the original `Встреча` top-level becomes 0x0. Prefer the detached window:
     # it is also where unread conversation rows continue to be exposed to UIA.
-    window = max(candidates, key=score)
+    window = max(candidates, key=_window_score)
     rect = window.rectangle()
     if rect.left < -10000 or rect.top < -10000:
         window.restore()
         time.sleep(0.5)
     return window
+
+
+def find_chat_windows() -> tuple[Any, Any]:
+    """Return `(private_window, public_window)` for non-switching monitoring."""
+    candidates = _meeting_candidates()
+    if not candidates:
+        raise RuntimeError("Окно встречи не найдено. Откройте встречу в приложении Толк.")
+
+    detached = [window for window in candidates if _name(window) == "ktalk"]
+    for public_window in sorted(detached, key=_window_score, reverse=True):
+        private = [
+            window
+            for window in candidates
+            if window.process_id() == public_window.process_id()
+            and _name(window) == "Встреча"
+        ]
+        if private:
+            return max(private, key=_window_score), public_window
+
+    single_window = max(candidates, key=_window_score)
+    return single_window, single_window
+
+
+def prepare_chat_windows(private_window: Any, public_window: Any) -> None:
+    """Configure separate Talk surfaces once, before the read-only polling loop."""
+    if _same_window(private_window, public_window):
+        ensure_private_list(private_window)
+        return
+    ensure_public_chat(public_window)
+    ensure_private_list(private_window)
 
 
 def _button(window: Any, predicate: Callable[[Any], bool]) -> Any | None:
@@ -394,6 +433,7 @@ def _emit(message: TalkMessage, log_path: Path | None) -> None:
 def scan(
     window: Any,
     *,
+    public_window: Any | None = None,
     include_read: bool,
     organizer: str | None,
     seen: set[tuple[str, str, str, str, int]],
@@ -433,16 +473,23 @@ def scan(
         _return_to_private_list(window)
 
     ensure_private_list(window)
-    public_tab = _public_tab(window)
-    should_read_public = include_read or _tab_unread(public_tab) > 0
-    if should_read_public:
-        ensure_public_chat(window)
-        public_conversation = Conversation(
-            name=PUBLIC_CONVERSATION,
-            label=PUBLIC_CONVERSATION,
-            unread=None,
-        )
-        collect(read_open_conversation(window, public_conversation))
+    public_source = public_window if public_window is not None else window
+    separate_public_window = not _same_window(window, public_source)
+    public_tab = _public_tab(public_source)
+    public_conversation = Conversation(
+        name=PUBLIC_CONVERSATION,
+        label=PUBLIC_CONVERSATION,
+        unread=None,
+    )
+    if separate_public_window:
+        if public_tab is None or "_active" not in _class_name(public_tab):
+            raise RuntimeError(
+                "Отдельное окно Толка больше не открыто на вкладке «Общий чат»."
+            )
+        collect(read_open_conversation(public_source, public_conversation))
+    elif include_read or _tab_unread(public_tab) > 0:
+        ensure_public_chat(public_source)
+        collect(read_open_conversation(public_source, public_conversation))
         ensure_private_list(window)
 
     conversations = list_conversations(window)
@@ -504,7 +551,8 @@ def main() -> int:
         raise SystemExit("--interval должен быть не меньше 0.2 секунды.")
 
     print("Ищу окно встречи Контур.Толка…", flush=True)
-    window = find_meeting_window()
+    private_window, public_window = find_chat_windows()
+    prepare_chat_windows(private_window, public_window)
     print(
         "Подключено. Внимание: открытые скриптом сообщения станут прочитанными в Толке.",
         flush=True,
@@ -515,7 +563,8 @@ def main() -> int:
     try:
         while True:
             total, emitted = scan(
-                window,
+                private_window,
+                public_window=public_window,
                 include_read=args.include_read and first_pass,
                 organizer=args.organizer,
                 seen=seen,
