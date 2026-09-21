@@ -21,6 +21,28 @@ class ScanTests(unittest.TestCase):
 
         self.assertNotEqual(first.fingerprint, second.fingerprint)
 
+    def test_scan_does_not_switch_tabs_without_unread_messages(self) -> None:
+        with (
+            patch.object(reader, "_conversation_header", return_value=None),
+            patch.object(reader, "ensure_private_list"),
+            patch.object(reader, "_public_tab", return_value=object()),
+            patch.object(reader, "_tab_unread", return_value=0),
+            patch.object(reader, "ensure_public_chat") as open_public,
+            patch.object(reader, "read_open_conversation") as read_messages,
+            patch.object(reader, "list_conversations", return_value=[]),
+        ):
+            total, emitted = reader.scan(
+                object(),
+                include_read=False,
+                organizer=None,
+                seen=set(),
+                log_path=None,
+            )
+
+        self.assertEqual((total, emitted), (0, 0))
+        open_public.assert_not_called()
+        read_messages.assert_not_called()
+
     def test_scan_merges_public_chat_and_unread_private_conversations(self) -> None:
         public_message = reader.TalkMessage(
             captured_at="2026-09-21T12:00:00+03:00",
@@ -54,7 +76,8 @@ class ScanTests(unittest.TestCase):
             patch.object(reader, "ensure_public_chat"),
             patch.object(reader, "read_open_conversation", side_effect=read_messages),
             patch.object(reader, "ensure_private_list"),
-            patch.object(reader, "_private_search", return_value=None),
+            patch.object(reader, "_public_tab", return_value=object()),
+            patch.object(reader, "_tab_unread", return_value=1),
             patch.object(reader, "list_conversations", return_value=conversations),
             patch.object(reader, "_open_conversation"),
             patch.object(reader, "_return_to_private_list"),

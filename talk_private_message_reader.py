@@ -180,6 +180,13 @@ def _public_tab(window: Any) -> Any | None:
     return _button(window, lambda item: _name(item).upper().startswith("ОБЩИЙ ЧАТ"))
 
 
+def _tab_unread(tab: Any | None) -> int:
+    if tab is None:
+        return 0
+    unread_match = UNREAD_RE.search(_name(tab))
+    return int(unread_match.group(1)) if unread_match else 0
+
+
 def _conversation_header(window: Any) -> Any | None:
     left = _content_bounds(window).left
     return _button(
@@ -271,27 +278,6 @@ def list_conversations(window: Any) -> list[Conversation]:
             )
         )
     return result
-
-
-def _private_search(window: Any) -> Any | None:
-    for item in window.descendants(control_type="Edit"):
-        if "tl-input__input" in _class_name(item):
-            return item
-    return None
-
-
-def _set_private_search(window: Any, value: str) -> None:
-    search = _private_search(window)
-    if search is None:
-        raise RuntimeError("В списке личных чатов не найдено поле поиска.")
-    # Chromium's UIA ValuePattern sometimes accepts SetValue without updating
-    # the actual React input. Keyboard clearing updates both the DOM and UIA.
-    search.set_focus()
-    search.type_keys("^a{BACKSPACE}", set_foreground=False)
-    if value:
-        time.sleep(0.05)
-        search.type_keys(value, with_spaces=True, set_foreground=False)
-    time.sleep(0.15)
 
 
 def _open_conversation(window: Any, conversation: Conversation) -> None:
@@ -446,21 +432,19 @@ def scan(
             return 1, emitted
         _return_to_private_list(window)
 
-    ensure_public_chat(window)
-    public_conversation = Conversation(
-        name=PUBLIC_CONVERSATION,
-        label=PUBLIC_CONVERSATION,
-        unread=None,
-    )
-    collect(read_open_conversation(window, public_conversation))
-
     ensure_private_list(window)
-    # A previous lookup can leave text in Talk's search field. In that state an
-    # unread badge is visible, but the conversation row is filtered out and a
-    # watcher sees an empty inbox forever.
-    search = _private_search(window)
-    if search is not None and _name(search).replace("\ufffc", "").strip():
-        _set_private_search(window, "")
+    public_tab = _public_tab(window)
+    should_read_public = include_read or _tab_unread(public_tab) > 0
+    if should_read_public:
+        ensure_public_chat(window)
+        public_conversation = Conversation(
+            name=PUBLIC_CONVERSATION,
+            label=PUBLIC_CONVERSATION,
+            unread=None,
+        )
+        collect(read_open_conversation(window, public_conversation))
+        ensure_private_list(window)
+
     conversations = list_conversations(window)
     # The detached ktalk chat keeps unread counts on conversation rows. Read all
     # conversations only on startup; subsequent passes open just rows with new

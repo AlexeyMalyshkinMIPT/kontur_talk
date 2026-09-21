@@ -51,7 +51,7 @@ class TalkInbox:
         self.senders: set[str] = set()
         self.seen: set[tuple[str, str, str, str, int]] = set()
         self.empty_hint_visible = True
-        self.topmost = BooleanVar(value=not args.no_topmost)
+        self.topmost = BooleanVar(value=args.topmost)
 
         self._configure_window()
         self._build_ui()
@@ -209,7 +209,7 @@ class TalkInbox:
                         window = find_meeting_window()
                     total, emitted = scan(
                         window,
-                        include_read=first_pass,
+                        include_read=self.args.include_history and first_pass,
                         organizer=self.args.organizer,
                         seen=self.seen,
                         log_path=self.args.log,
@@ -307,8 +307,8 @@ class TalkInbox:
         self.status_label.configure(text=text)
 
     def _pulse(self) -> None:
-        self.root.attributes("-topmost", True)
-        self.root.after(700, lambda: self.root.attributes("-topmost", self.topmost.get()))
+        self.status_dot.itemconfigure(self.status_oval, fill=ACCENT)
+        self.root.after(700, lambda: self.status_dot.itemconfigure(self.status_oval, fill=GREEN))
 
     def close(self) -> None:
         self.stop_event.set()
@@ -338,9 +338,14 @@ def parse_args() -> argparse.Namespace:
         help="Локальный JSONL-лог сообщений.",
     )
     parser.add_argument(
-        "--no-topmost",
+        "--topmost",
         action="store_true",
-        help="Не закреплять окно поверх остальных.",
+        help="Закрепить окно поверх остальных (по умолчанию выключено).",
+    )
+    parser.add_argument(
+        "--include-history",
+        action="store_true",
+        help="При старте открыть все личные диалоги и прочитать историю.",
     )
     args = parser.parse_args()
     if args.interval < 0.2:
