@@ -71,6 +71,17 @@ class TalkInbox:
         x = max(20, screen_width - width - 32)
         self.root.geometry(f"{width}x{height}+{x}+64")
         self.root.attributes("-topmost", self.topmost.get())
+        self.root.after_idle(self._show_once_on_launch)
+
+    def _show_once_on_launch(self) -> None:
+        """Make a newly started window visible, then return it to normal behavior."""
+        self.root.deiconify()
+        self.root.lift()
+        self.root.attributes("-topmost", True)
+        self.root.after(700, self._release_launch_topmost)
+
+    def _release_launch_topmost(self) -> None:
+        self.root.attributes("-topmost", self.topmost.get())
 
     def _build_ui(self) -> None:
         header = Frame(self.root, background=PANEL, padx=22, pady=18)
