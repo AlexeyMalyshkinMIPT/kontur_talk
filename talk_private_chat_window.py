@@ -51,6 +51,7 @@ MOD_CONTROL = 0x0002
 MOD_SHIFT = 0x0004
 MOD_NOREPEAT = 0x4000
 VK_F10 = 0x79
+VK_CONTROL = 0x11
 HOTKEY_ID = 0x4B54
 
 
@@ -72,6 +73,7 @@ class TalkInbox:
         self.empty_hint_visible = True
         self.topmost = BooleanVar(value=args.topmost)
         self.click_through = BooleanVar(value=args.click_through)
+        self.click_through_applied: bool | None = None
         self.hotkey_registered = False
 
         self._configure_window()
@@ -222,7 +224,7 @@ class TalkInbox:
         ).pack(side="left")
         Label(
             footer,
-            text="Ctrl+Shift+F10 · разблокировать",
+            text="Удерживай Ctrl · двигай окно",
             background=PANEL,
             foreground=MUTED,
             font=("Segoe UI", 9),
@@ -238,8 +240,11 @@ class TalkInbox:
         return handles
 
     def _apply_click_through(self) -> None:
-        enabled = self.click_through.get()
         user32 = ctypes.windll.user32
+        ctrl_held = bool(user32.GetAsyncKeyState(VK_CONTROL) & 0x8000)
+        enabled = self.click_through.get() and not ctrl_held
+        if enabled == self.click_through_applied:
+            return
         for handle in self._window_handles():
             style = user32.GetWindowLongW(handle, GWL_EXSTYLE)
             if enabled:
@@ -259,6 +264,7 @@ class TalkInbox:
                 | SWP_NOACTIVATE
                 | SWP_FRAMECHANGED,
             )
+        self.click_through_applied = enabled
         self.root.attributes("-topmost", self.topmost.get())
 
     def _register_hotkey(self) -> None:
@@ -266,10 +272,9 @@ class TalkInbox:
         self.hotkey_registered = bool(
             ctypes.windll.user32.RegisterHotKey(None, HOTKEY_ID, modifiers, VK_F10)
         )
-        if self.hotkey_registered:
-            self.root.after(100, self._poll_hotkey)
+        self.root.after(50, self._poll_input_state)
 
-    def _poll_hotkey(self) -> None:
+    def _poll_input_state(self) -> None:
         message = wintypes.MSG()
         user32 = ctypes.windll.user32
         while user32.PeekMessageW(
@@ -277,9 +282,9 @@ class TalkInbox:
         ):
             if message.wParam == HOTKEY_ID:
                 self.click_through.set(not self.click_through.get())
-                self._apply_click_through()
+        self._apply_click_through()
         if not self.stop_event.is_set():
-            self.root.after(100, self._poll_hotkey)
+            self.root.after(50, self._poll_input_state)
 
     def _watch(self) -> None:
         pythoncom.CoInitialize()
